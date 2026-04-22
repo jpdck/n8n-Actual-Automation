@@ -1,0 +1,256 @@
+{
+  "name": "01 📅 Sunday Financial Briefing",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 19 * * 0"
+            }
+          ]
+        }
+      },
+      "id": "9c43a6ae-18c6-4c8f-88b4-1bca832904ba",
+      "name": "Every Sunday 7pm",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        784,
+        704
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const now = new Date();\nconst month = now.toISOString().slice(0, 7);\nconst daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();\nconst dayOfMonth = now.getDate();\nconst daysLeft = daysInMonth - dayOfMonth;\n\nreturn [{\n  json: {\n    bridgeUrl:        'http://actual-bridge:3788',\n    telegramChatId:   'REPLACE_WITH_YOUR_TELEGRAM_CHAT_ID',\n    currentMonth: month,\n    daysLeft,\n    dayOfMonth,\n    weekNumber: Math.ceil(dayOfMonth / 7),\n  }\n}];"
+      },
+      "id": "dac9b707-7504-40a5-8f1c-340e9667be81",
+      "name": "Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        992,
+        704
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.bridgeUrl }}/budget/{{ $json.currentMonth }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": []
+        },
+        "options": {},
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth"
+      },
+      "id": "3f3997fd-1657-4c73-9094-2efd1cf9e9ba",
+      "name": "Get Month Budget",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1184,
+        704
+      ],
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "CRED_BRIDGE_ID",
+          "name": "Actual Budget Bridge"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const monthData = $input.item.json;\nconst config = $('Config').item.json;\nconst groups = monthData.data?.categoryGroups || [];\n\n// Skip these groups from the briefing\nconst skipGroups = ['Income'];\n// Skip these individual categories\nconst skipCategories = ['Starting Balances', 'CC Carrying Balance'];\n\nlet totalBudgeted = 0;\nlet totalSpent = 0;\nlet overspent = [];\nlet warnings = [];\nlet budgetSections = [];\n\nfor (const group of groups) {\n  if (group.hidden || skipGroups.includes(group.name)) continue;\n  const cats = [];\n  for (const cat of (group.categories || [])) {\n    if (cat.hidden || skipCategories.includes(cat.name)) continue;\n    const budgeted = (cat.budgeted || 0) / 100;\n    const spent = Math.abs((cat.spent || 0) / 100);\n    const balance = (cat.balance || 0) / 100;\n    const pct = budgeted > 0 ? Math.round((spent / budgeted) * 100) : 0;\n    totalBudgeted += budgeted;\n    totalSpent += spent;\n    if (balance < 0) overspent.push({ name: cat.name, over: Math.abs(balance) });\n    else if (pct > 80 && config.daysLeft > 5) warnings.push({ name: cat.name, pct, balance });\n    if (budgeted > 0 || spent > 0) cats.push({ name: cat.name, budgeted, spent, balance, pct });\n  }\n  if (cats.length > 0) budgetSections.push({ groupName: group.name, categories: cats });\n}\n\nreturn [{ json: { ...config, budgetSections, totalBudgeted, totalSpent, totalRemaining: totalBudgeted - totalSpent, overspent, warnings } }];"
+      },
+      "id": "9b8fdc78-0749-4a0d-8077-263fd34cbeeb",
+      "name": "Process Budget",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1392,
+        704
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const d = $input.item.json;\nlet summary = '';\nfor (const s of d.budgetSections) {\n  summary += `\\n${s.groupName}:\\n`;\n  for (const c of s.categories) {\n    summary += `  ${c.name}: $${c.spent.toFixed(0)} of $${c.budgeted.toFixed(0)} (${c.pct}% used, $${c.balance.toFixed(0)} left)\\n`;\n  }\n}\n\nconst prompt = `You are a personal financial assistant. It's Sunday evening in Detroit, MI. Give a concise weekly budget briefing.\n\nContext:\n- Week ${d.weekNumber} of the month, ${d.daysLeft} days remaining\n- Total budgeted: $${d.totalBudgeted.toFixed(0)}, spent: $${d.totalSpent.toFixed(0)}, remaining: $${d.totalRemaining.toFixed(0)}\n- Overspent categories: ${d.overspent.length > 0 ? d.overspent.map(c => c.name + ' ($' + c.over.toFixed(0) + ' over)').join(', ') : 'None'}\n- Warning (>80% used): ${d.warnings.length > 0 ? d.warnings.map(c => c.name + ' ' + c.pct + '%').join(', ') : 'None'}\n\nBudget detail:${summary}\n\nWrite a brief (under 200 words), direct, friendly briefing. Lead with the overall picture, flag anything urgent, end with one practical suggestion for the week. Plain text only, no markdown.`;\n\nreturn [{ json: { ...d, prompt } }];"
+      },
+      "id": "36caee2d-1a22-4bd6-a6ea-a39f31fb2097",
+      "name": "Build Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1584,
+        704
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 400, messages: [{ role: 'user', content: $json.prompt }] }) }}",
+        "options": {},
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "anthropicApi"
+      },
+      "id": "bb69fb1d-2956-43d8-a8b4-da419a8bb678",
+      "name": "Ask Claude",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1792,
+        704
+      ],
+      "credentials": {
+        "anthropicApi": {
+          "id": "CRED_ANTHROPICAPI_ID",
+          "name": "Anthropic API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const res = $input.item.json;\nconst config = $('Build Prompt').item.json;\nconst summary = res.content?.[0]?.text || 'Unable to generate summary.';\nconst date = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });\n\nlet msg = 'WEEKLY FINANCIAL BRIEFING - ' + date + '\\n\\n';\nmsg += summary;\nif (config.overspent.length > 0) {\n  msg += '\\n\\nOVERSPENT: ' + config.overspent.map(c => c.name + ' ($' + c.over.toFixed(0) + ' over)').join(', ');\n}\nmsg += '\\n\\n--- Quick Stats ---';\nmsg += '\\nSpent: $' + config.totalSpent.toFixed(0) + ' / $' + config.totalBudgeted.toFixed(0) + ' budgeted';\nmsg += '\\nRemaining: $' + config.totalRemaining.toFixed(0) + ' | ' + config.daysLeft + ' days left';\n\nreturn [{ json: { ...config, telegramMessage: msg } }];"
+      },
+      "id": "731cef58-a301-495d-8da4-3101a224dcf0",
+      "name": "Format Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1984,
+        704
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $json.telegramChatId }}",
+        "text": "={{ $json.telegramMessage }}",
+        "additionalFields": {}
+      },
+      "id": "9ae75d5f-75db-438b-8a02-d31c0da0ffad",
+      "name": "Send Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [
+        2192,
+        704
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "CRED_TELEGRAM_ID",
+          "name": "Telegram Bot"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Every Sunday 7pm": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Get Month Budget",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Month Budget": {
+      "main": [
+        [
+          {
+            "node": "Process Budget",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Budget": {
+      "main": [
+        [
+          {
+            "node": "Build Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Prompt": {
+      "main": [
+        [
+          {
+            "node": "Ask Claude",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ask Claude": {
+      "main": [
+        [
+          {
+            "node": "Format Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Message": {
+      "main": [
+        [
+          {
+            "node": "Send Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "ddb06008-90e7-48c3-97b5-f828f1c3b401",
+  "meta": {
+    "instanceId": "1bed0a85a374b293a0ae04ae85d310dadcbdad591ac0a08781d2b9ef5e91b791"
+  },
+  "id": "JCq86Z3LxRWTKKHK",
+  "tags": []
+}

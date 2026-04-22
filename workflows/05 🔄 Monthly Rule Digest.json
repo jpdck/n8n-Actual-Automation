@@ -1,0 +1,449 @@
+{
+  "name": "05 🔄 Monthly Rule Digest",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 19 1 * *"
+            }
+          ]
+        }
+      },
+      "id": "05d84e42-9ff9-4c09-b093-13517e8bbf6c",
+      "name": "1st of Month 7pm",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -112,
+        -16
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const now = new Date();\nconst today = now.toISOString().slice(0, 10);\nconst lookback = new Date(now - 60 * 24 * 60 * 60 * 1000);\nconst startDate = lookback.toISOString().slice(0, 10);\nconst lastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1)\n  .toLocaleDateString('en-US', { month: 'long', year: 'numeric' });\n\n// ── ACCOUNT IDs ───────────────────────────────────────────────────────────────\n// List your on-budget account IDs here (checking + credit cards).\n// Run Workflow 00 (Discovery) to get these IDs.\n// The Rule Digest looks at transactions across all of these accounts.\nconst accountIds = [\n  'GET_FROM_WF00',  // e.g. Checking\n  'GET_FROM_WF00',  // e.g. Credit Card 1\n  'GET_FROM_WF00',  // e.g. Credit Card 2\n  // Add more as needed — one ID per line\n];\n\nreturn [{ json: {\n  bridgeUrl:        'http://actual-bridge:3788',\n  notionDatabaseId: 'REPLACE_WITH_YOUR_NOTION_RULES_DB_ID',\n  telegramChatId:   'REPLACE_WITH_YOUR_TELEGRAM_CHAT_ID',\n  accountIds, startDate, today, lastMonth\n} }];"
+      },
+      "id": "c5cb7fee-01e4-4414-9a7d-4af21eeeabfd",
+      "name": "Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        112,
+        -16
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const config = $input.item.json;\nreturn config.accountIds.map(accountId => ({ json: { ...config, accountId } }));"
+      },
+      "id": "23a8fbb1-8e51-4bdc-a5ad-d08e84858cda",
+      "name": "Split by Account",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        336,
+        -16
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.bridgeUrl }}/transactions?accountId={{ $json.accountId }}&startDate={{ $json.startDate }}&endDate={{ $json.today }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": []
+        },
+        "options": {},
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth"
+      },
+      "id": "e58ce5c2-4e3e-4e5a-b9c6-89ad05eec8c4",
+      "name": "Get Transactions",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        560,
+        -16
+      ],
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "CRED_BRIDGE_ID",
+          "name": "Actual Budget Bridge"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst config = $('Config').item.json;\nconst allTx = [];\nfor (const item of items) {\n  const txs = item.json.data || [];\n  for (const tx of txs) {\n    if (tx.amount < 0 && !tx.starting_balance_flag && !tx.transfer_id) {\n      allTx.push({\n        date: tx.date,\n        payee: tx.imported_payee || tx.payee_name || 'Unknown',\n        amount: Math.abs(tx.amount) / 100\n      });\n    }\n  }\n}\nreturn [{ json: { ...config, allTransactions: allTx } }];"
+      },
+      "id": "2bcda879-7fe3-4c84-acb1-3ad49f52e581",
+      "name": "Merge Transactions",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        784,
+        -16
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.notion.com/v1/databases/{{ $json.notionDatabaseId }}/query",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Notion-Version",
+              "value": "2022-06-28"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{ \"page_size\": 100 }",
+        "options": {},
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "notionApi"
+      },
+      "id": "a5a017c7-9678-456e-b5e3-f6baac124a6b",
+      "name": "Get Rules Memory",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1008,
+        -16
+      ],
+      "credentials": {
+        "notionApi": {
+          "id": "CRED_NOTIONAPI_ID",
+          "name": "Notion API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const notionRes = $input.item.json;\nconst config = $('Merge Transactions').item.json;\n\n// Build known payees map from Notion\nconst knownPayees = {};\nfor (const page of (notionRes.results || [])) {\n  const props = page.properties || {};\n  const name = props.Payee && props.Payee.title && props.Payee.title[0]\n    ? props.Payee.title[0].plain_text : null;\n  const status = props.Status && props.Status.select ? props.Status.select.name : null;\n  if (name) knownPayees[name.toLowerCase()] = { status };\n}\n\n// Group transactions by payee\nconst groups = {};\nfor (const tx of (config.allTransactions || [])) {\n  const key = tx.payee.toLowerCase();\n  if (!groups[key]) groups[key] = { name: tx.payee, txs: [] };\n  groups[key].txs.push(tx);\n}\n\n// Detect patterns - skip already accepted or declined\nconst patterns = [];\nfor (const [key, g] of Object.entries(groups)) {\n  if (g.txs.length < 2) continue;\n  const known = knownPayees[key];\n  if (known && (known.status === 'Accepted' || known.status === 'Declined')) continue;\n\n  const amounts = g.txs.map(t => t.amount);\n  const avg = amounts.reduce((a, b) => a + b, 0) / amounts.length;\n  const variance = ((Math.max(...amounts) - Math.min(...amounts)) / avg) * 100;\n\n  const dates = g.txs.map(t => new Date(t.date)).sort((a, b) => a - b);\n  const intervals = [];\n  for (let i = 1; i < dates.length; i++) {\n    intervals.push(Math.round((dates[i] - dates[i-1]) / 86400000));\n  }\n  const avgInterval = intervals.length > 0\n    ? intervals.reduce((a, b) => a + b, 0) / intervals.length : 0;\n\n  let type = 'irregular';\n  if (avgInterval >= 6 && avgInterval <= 8) type = 'weekly';\n  else if (avgInterval >= 13 && avgInterval <= 16) type = 'bi-weekly';\n  else if (avgInterval >= 27 && avgInterval <= 35) type = 'monthly';\n  else if (g.txs.length >= 3) type = 'frequent';\n  if (type === 'irregular' && g.txs.length < 3) continue;\n\n  const desc = g.txs.length + 'x / 60 days, ' + type +\n    (variance < 5 ? ', fixed $' + avg.toFixed(2) : ', avg $' + avg.toFixed(2) + ' (' + Math.round(variance) + '% variance)');\n\n  patterns.push({ payee: g.name, patternDesc: desc, count: g.txs.length });\n}\n\nif (patterns.length === 0) return [{ json: { ...config, noPatterns: true } }];\n\nconst patternList = patterns.map(p => p.payee + ' | ' + p.patternDesc).join('\\n');\n\nconst prompt = 'You are a budget assistant.\\n\\n' +\n  'Recurring payment patterns detected in last 60 days:\\n' + patternList + '\\n\\n' +\n  'Available categories:\\nMortgage payment, Parent loan payment, Car loan payment, Unsecured personal loan payment, ' +\n  'Internet or Xfinity bill, Gas utility DTE or Consumers Energy, Electric utility bill, Water bill, ' +\n  'Cell phone or mobile phone bill, Streaming services Netflix Hulu Disney Plus, ' +\n  'Home improvement or maintenance repair, Gas station or fuel, Auto insurance premium, ' +\n  'Car repair or maintenance, Groceries Kroger Meijer Costco Aldi, ' +\n  'Restaurants fast food coffee shops DoorDash Grubhub, Hantz Financial Services advisor fee, ' +\n  'House cleaning service, OnStar subscription, Other subscription or professional service, ' +\n  'School fees lunch account supplies MISTAR, Hockey fees gear ice rink, ' +\n  'Other kids activities allowance sports misc, Doctor pharmacy medical gym fitness, ' +\n  'Haircut salon barber personal grooming, Clothing shoes apparel, ' +\n  'Entertainment hobbies events concerts tickets, Gifts for others birthday holiday, ' +\n  'Pet food vet grooming pet supplies, Amazon purchase online order, ' +\n  'Other online or retail shopping store, Miscellaneous hard to categorize one-off\\n\\n' +\n  'For each pattern suggest a category. Skip patterns too ambiguous to categorize reliably.\\n' +\n  'Respond ONLY with a raw JSON array, no markdown, no code fences:\\n' +\n  '[{\"payee\": \"exact name\", \"category\": \"exact category name\", \"confidence\": \"High|Medium|Low\", \"reason\": \"one sentence\"}, ...]';\n\nreturn [{ json: { ...config, patterns, prompt } }];"
+      },
+      "id": "95c6f884-0a04-479b-a6cb-0d046af967a8",
+      "name": "Detect Patterns",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1232,
+        -16
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 1000, messages: [{ role: 'user', content: $json.prompt }] }) }}",
+        "options": {},
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "anthropicApi"
+      },
+      "id": "fe7a2b29-20ae-4b0d-9780-85f56b419369",
+      "name": "Ask Claude",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1680,
+        -16
+      ],
+      "credentials": {
+        "anthropicApi": {
+          "id": "CRED_ANTHROPICAPI_ID",
+          "name": "Anthropic API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const claudeRes = $input.item.json;\nconst config = $('Detect Patterns').item.json;\nlet suggestions = [];\ntry {\n  const raw = claudeRes.content && claudeRes.content[0] ? claudeRes.content[0].text : '[]';\n  const cleaned = raw.replace(/```json\\n?/g, '').replace(/```\\n?/g, '').trim();\n  suggestions = JSON.parse(cleaned);\n} catch (e) {\n  suggestions = [];\n}\n// Enrich with pattern data\nconst enriched = suggestions.map(s => {\n  const p = (config.patterns || []).find(x => x.payee.toLowerCase() === s.payee.toLowerCase());\n  return { ...s, patternDesc: p ? p.patternDesc : '' };\n});\nif (enriched.length === 0) return [{ json: { ...config, noPatterns: true } }];\nreturn enriched.map(s => ({\n  json: {\n    notionDatabaseId: config.notionDatabaseId,\n    telegramChatId: config.telegramChatId,\n    lastMonth: config.lastMonth,\n    allSuggestions: enriched,\n    suggestion: s\n  }\n}));"
+      },
+      "id": "e1a13058-fd88-4e2d-ba03-8fc2166351cd",
+      "name": "Parse Suggestions",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1904,
+        -16
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.notion.com/v1/pages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Notion-Version",
+              "value": "2022-06-28"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ parent: { database_id: $json.notionDatabaseId }, properties: { 'Payee': { title: [{ text: { content: $json.suggestion.payee } }] }, 'Status': { select: { name: 'Pending' } }, 'Suggested Category': { rich_text: [{ text: { content: $json.suggestion.category || '' } }] }, 'Pattern': { rich_text: [{ text: { content: $json.suggestion.patternDesc || '' } }] }, 'Confidence': { select: { name: $json.suggestion.confidence || 'Medium' } }, 'Notes': { rich_text: [{ text: { content: $json.suggestion.reason || '' } }] } } }) }}",
+        "options": {},
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "notionApi"
+      },
+      "id": "5ee0bce8-d9dd-4711-bca8-0e99f3ced175",
+      "name": "Create Notion Entry",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2128,
+        -16
+      ],
+      "credentials": {
+        "notionApi": {
+          "id": "CRED_NOTIONAPI_ID",
+          "name": "Notion API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst config = items[0].json;\nconst suggestions = config.allSuggestions || [];\nlet msg = 'MONTHLY RULE DIGEST - ' + config.lastMonth + '\\n\\n';\nif (suggestions.length === 0) {\n  msg += 'No new recurring patterns found this month.';\n} else {\n  msg += suggestions.length + ' new pattern(s) added to Notion for review:\\n\\n';\n  const high = suggestions.filter(s => s.confidence === 'High');\n  const med = suggestions.filter(s => s.confidence === 'Medium');\n  const low = suggestions.filter(s => s.confidence === 'Low');\n  if (high.length > 0) {\n    msg += 'HIGH (create rule in Actual):\\n';\n    high.forEach(s => { msg += '  - ' + s.payee + ' -> ' + s.category + '\\n    ' + s.patternDesc + '\\n'; });\n    msg += '\\n';\n  }\n  if (med.length > 0) {\n    msg += 'MEDIUM (review first):\\n';\n    med.forEach(s => { msg += '  - ' + s.payee + ' -> ' + s.category + '\\n    ' + s.patternDesc + '\\n'; });\n    msg += '\\n';\n  }\n  if (low.length > 0) {\n    msg += 'LOW (probably skip):\\n';\n    low.forEach(s => { msg += '  - ' + s.payee + '\\n'; });\n    msg += '\\n';\n  }\n  msg += 'Review in Notion: https://notion.so/3a47cc37a3684de1a7c74718b6c65253\\n';\n  msg += 'Create rules in Actual: http://your-actual-budget-url';\n}"
+      },
+      "id": "48ea57c9-acde-4bbe-be57-89fc001dc140",
+      "name": "Build Telegram Digest",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2352,
+        -16
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $json.telegramChatId }}",
+        "text": "={{ $json.telegramMessage }}",
+        "additionalFields": {}
+      },
+      "id": "905ea696-7300-45a5-991d-98daab0bebf6",
+      "name": "Send Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [
+        2576,
+        -16
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "CRED_TELEGRAM_ID",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "81f01da2-6bd9-403d-8a41-d471fd2652ae",
+              "leftValue": "={{ $json.noPatterns }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "false",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1456,
+        -16
+      ],
+      "id": "e503289b-64a7-4efe-900c-f1b3fedd28ac",
+      "name": "If"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "1st of Month 7pm": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Split by Account",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split by Account": {
+      "main": [
+        [
+          {
+            "node": "Get Transactions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Transactions": {
+      "main": [
+        [
+          {
+            "node": "Merge Transactions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Transactions": {
+      "main": [
+        [
+          {
+            "node": "Get Rules Memory",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Rules Memory": {
+      "main": [
+        [
+          {
+            "node": "Detect Patterns",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Detect Patterns": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ask Claude": {
+      "main": [
+        [
+          {
+            "node": "Parse Suggestions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Suggestions": {
+      "main": [
+        [
+          {
+            "node": "Create Notion Entry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Notion Entry": {
+      "main": [
+        [
+          {
+            "node": "Build Telegram Digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Telegram Digest": {
+      "main": [
+        [
+          {
+            "node": "Send Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Ask Claude",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "3cfced32-d7ea-4098-8d83-51851ac56200",
+  "meta": {
+    "instanceId": "1bed0a85a374b293a0ae04ae85d310dadcbdad591ac0a08781d2b9ef5e91b791"
+  },
+  "id": "eRtrKiEKMByiPAnl",
+  "tags": []
+}

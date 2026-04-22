@@ -1,0 +1,195 @@
+{
+  "name": "04 💵 Friday Paycheck Summary",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 0 7 * * 5"
+            }
+          ]
+        }
+      },
+      "id": "f0612a93-1f02-4c74-bdb7-a559f136b58d",
+      "name": "Every Friday 6pm",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -848,
+        656
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const now = new Date();\nconst today = now.toISOString().slice(0, 10);\nconst sevenDaysAgo = new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);\nconst currentMonth = now.toISOString().slice(0, 7);\n\n// ── PAYCHECK DETECTION ────────────────────────────────────────────────────────\n// The workflow looks for a deposit in your checking account this week that\n// matches your expected paycheck amount (within tolerance).\n// Run Workflow 00 to get your checkingAccountId.\n//\n// expectedPaycheck:   your typical net (take-home) paycheck amount\n// paycheckTolerance:  how many dollars off it can be and still count\n//                     (covers tax adjustments, benefit changes, etc.)\n\nreturn [{\n  json: {\n    bridgeUrl:        'http://actual-bridge:3788',\n    telegramChatId:   'REPLACE_WITH_YOUR_TELEGRAM_CHAT_ID',\n    checkingAccountId: 'GET_FROM_WF00',  // your primary checking account ID\n    expectedPaycheck:  0,     // REPLACE: your typical net paycheck amount\n    paycheckTolerance: 200,   // dollars of wiggle room (adjust up if deductions vary)\n    today,\n    sevenDaysAgo,\n    currentMonth,\n  }\n}];"
+      },
+      "id": "490ca6f0-e09c-4c99-b6e4-d84547fa3ba1",
+      "name": "Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -656,
+        656
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.bridgeUrl }}/transactions?accountId={{ $json.checkingAccountId }}&startDate={{ $json.sevenDaysAgo }}&endDate={{ $json.today }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": []
+        },
+        "options": {},
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth"
+      },
+      "id": "20133ccf-d538-4326-abb5-07d86f87d8a8",
+      "name": "Get Checking Transactions",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -416,
+        656
+      ],
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "CRED_BRIDGE_ID",
+          "name": "Actual Budget Bridge"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "={{ $('Config').item.json.bridgeUrl }}/budget/{{ $('Config').item.json.currentMonth }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": []
+        },
+        "options": {},
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth"
+      },
+      "id": "a72e8363-856f-4db3-80ed-7e46fcbe86d9",
+      "name": "Get Month Budget",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -192,
+        656
+      ],
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "CRED_BRIDGE_ID",
+          "name": "Actual Budget Bridge"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const config       = $('Config').item.json;\nconst txRes        = $('Get Checking Transactions').item.json;\nconst monthRes     = $('Get Month Budget').item.json;\nconst transactions = txRes.data || [];\nconst groups       = monthRes.data?.categoryGroups || [];\n\n// ── Paycheck detection ────────────────────────────────────────────────────────\nconst paycheckCents  = config.expectedPaycheck * 100;\nconst toleranceCents = config.paycheckTolerance * 100;\nconst paycheckTx = transactions.find(t =>\n  t.amount > 0 && Math.abs(t.amount - paycheckCents) <= toleranceCents\n);\nconst paycheckAmount = paycheckTx ? paycheckTx.amount / 100 : 0;\nconst paycheckFound  = !!paycheckTx;\n\n// ── Build message ─────────────────────────────────────────────────────────────\nconst date = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });\nlet msg = 'FRIDAY PAYCHECK UPDATE - ' + date + '\\n\\n';\n\nif (paycheckFound) {\n  msg += 'Paycheck received: $' + paycheckAmount.toFixed(2) + '\\n';\n} else {\n  msg += 'No paycheck detected this week\\n';\n  msg += '(expected ~$' + config.expectedPaycheck.toFixed(2) + ' — check manually)\\n';\n}\nmsg += '\\n';\n\n// ── Budget snapshot for the month ─────────────────────────────────────────────\nlet budgetLines = '';\nfor (const group of groups) {\n  const groupSpent  = (group.categories || []).reduce((s, c) => s + (c.spent  || 0), 0) / 100;\n  const groupBudget = (group.categories || []).reduce((s, c) => s + (c.budgeted || 0), 0) / 100;\n  if (groupBudget > 0) {\n    const pct = ((groupSpent / groupBudget) * 100).toFixed(0);\n    budgetLines += group.name + ': $' + groupSpent.toFixed(0) + ' / $' + groupBudget.toFixed(0) + ' (' + pct + '%)\\n';\n  }\n}\nif (budgetLines) {\n  msg += 'Month-to-date budget:\\n' + budgetLines;\n}\n\nmsg += '\\nRemember to categorize any uncategorized transactions in Actual.';\nreturn [{ json: { ...config, telegramMessage: msg } }];"
+      },
+      "id": "d4611413-b95f-48bc-8149-0db7424918b3",
+      "name": "Build Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        64,
+        656
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $json.telegramChatId }}",
+        "text": "={{ $json.telegramMessage }}",
+        "additionalFields": {}
+      },
+      "id": "a8fcee58-2b21-4fdb-8539-704032810c71",
+      "name": "Send Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [
+        272,
+        656
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "CRED_TELEGRAM_ID",
+          "name": "Telegram Bot"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Every Friday 6pm": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Get Checking Transactions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Checking Transactions": {
+      "main": [
+        [
+          {
+            "node": "Get Month Budget",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Month Budget": {
+      "main": [
+        [
+          {
+            "node": "Build Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Summary": {
+      "main": [
+        [
+          {
+            "node": "Send Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "93a22e1e-c9e3-4f9b-b873-2d3d0ce7da4a",
+  "meta": {
+    "instanceId": "1bed0a85a374b293a0ae04ae85d310dadcbdad591ac0a08781d2b9ef5e91b791"
+  },
+  "id": "zQBN8bW19sOqBnAO",
+  "tags": []
+}

@@ -1,0 +1,191 @@
+{
+  "name": "02 💸 Monthly Auto-Fund Envelopes",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 6 1 * *"
+            }
+          ]
+        }
+      },
+      "id": "d1de5b2a-356b-493f-85bc-a433d7e9459a",
+      "name": "1st of Month 6am",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        2208,
+        -528
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const now = new Date();\nconst today = now.toISOString().slice(0, 10);\nconst currentMonth = now.toISOString().slice(0, 7);\n\n// ── Monthly income estimate ───────────────────────────────────────────────────\n// Set this to your expected monthly take-home (after taxes and deductions).\n// Update whenever your pay changes.\nconst monthlyIncome = 0; // REPLACE: your monthly net income in dollars\n\n// ── Funding template ─────────────────────────────────────────────────────────\n// HOW TO FILL THIS IN:\n//   1. Run Workflow 00 (Discovery) to get your category IDs\n//   2. Copy each categoryId from the Discovery output\n//   3. Set the amount for each category\n//   4. Delete rows that don't apply to your budget\n//\n// type: 'fixed'     = exact dollar amount every month\n// type: 'remainder' = gets whatever is left after all fixed items run\n// skip: true        = exclude this category from auto-funding\nconst fundingTemplate = [\n\n  // ── DEBT MINIMUMS (fund first) ────────────────────────────────────────────\n  { name: 'Mortgage / Rent',    categoryId: 'GET_FROM_WF00', amount: 0, type: 'fixed' },\n  { name: 'Auto Loan',          categoryId: 'GET_FROM_WF00', amount: 0, type: 'fixed' },\n  { name: 'Personal Loan',      categoryId: 'GET_FROM_WF00', amount: 0, type: 'fixed' },\n\n  // ── HOUSING ───────────────────────────────────────────────────────────────\n  { name: 'Internet',           categoryId: 'GET_FROM_WF00', amount: 0, type: 'fixed' },\n  { name: 'Gas (Utility)',      categoryId: 'GET_FROM_WF00', amount: 0, type: 'fixed' },\n  { name: 'Electric',           categoryId: 'GET_FROM_WF00', amount: 0, type: 'fixed' },\n  { name: 'Water',              categoryId: 'GET_FROM_WF00', amount: 0, type: 'fixed' },\n  { name: 'Mobile Phone',       categoryId: 'GET_FROM_WF00', amount: 0, type: 'fixed' },\n  { name: 'Streaming Services', categoryId: 'GET_FROM_WF00', amount: 0, type: 'fixed' },\n\n  // ── AUTO ──────────────────────────────────────────────────────────────────\n  { name: 'Gas (Auto)',         categoryId: 'GET_FROM_WF00', amount: 0, type: 'fixed' },\n  { name: 'Auto Insurance',     categoryId: 'GET_FROM_WF00', amount: 0, type: 'fixed' },\n  { name: 'Auto Maintenance',   categoryId: 'GET_FROM_WF00', amount: 0, type: 'fixed' },\n\n  // ── FOOD ──────────────────────────────────────────────────────────────────\n  { name: 'Groceries',          categoryId: 'GET_FROM_WF00', amount: 0, type: 'fixed' },\n  { name: 'Dining Out',         categoryId: 'GET_FROM_WF00', amount: 0, type: 'fixed' },\n\n  // ── PERSONAL ──────────────────────────────────────────────────────────────\n  { name: 'Health & Medical',   categoryId: 'GET_FROM_WF00', amount: 0, type: 'fixed' },\n  { name: 'Personal Care',      categoryId: 'GET_FROM_WF00', amount: 0, type: 'fixed' },\n  { name: 'Entertainment',      categoryId: 'GET_FROM_WF00', amount: 0, type: 'fixed' },\n  { name: 'Misc',               categoryId: 'GET_FROM_WF00', amount: 0, type: 'fixed' },\n\n  // ── SAVINGS ───────────────────────────────────────────────────────────────\n  { name: 'Emergency Fund',     categoryId: 'GET_FROM_WF00', amount: 0, type: 'fixed' },\n\n  // ── DEBT ATTACK (remainder after all fixed) ───────────────────────────────\n  // Change the name and categoryId to whichever debt you are attacking.\n  // 'remainder' type gets everything left over after fixed items are funded.\n  { name: 'Extra Debt Payment', categoryId: 'GET_FROM_WF00', amount: 0, type: 'remainder' },\n];\n\nreturn [{\n  json: {\n    bridgeUrl:        'http://actual-bridge:3788',\n    telegramChatId:   'REPLACE_WITH_YOUR_TELEGRAM_CHAT_ID',\n    currentMonth,\n    today,\n    monthlyIncome,\n    fundingTemplate,\n  }\n}];"
+      },
+      "id": "fc27e5f2-fd16-409d-b34f-af992ecc8476",
+      "name": "Config + Funding Template",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2416,
+        -528
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const config = $input.item.json;\nconst today = config.today;\n\n// Filter template by active dates\nconst template = config.fundingTemplate.filter(cat => {\n  if (cat.skip) return false;\n  if (cat.activeUntil && today > cat.activeUntil) return false;\n  if (cat.activeAfter && today <= cat.activeAfter) return false;\n  return true;\n});\n\n// Sum fixed amounts\nconst fixedTotal = template\n  .filter(c => c.type === 'fixed')\n  .reduce((sum, c) => sum + c.amount, 0);\n\nconst remainder = Math.max(0, config.monthlyIncome - fixedTotal);\nconst remainderCats = template.filter(c => c.type === 'remainder');\nconst perRemainder = remainderCats.length > 0 ? remainder / remainderCats.length : 0;\n\n// Assign final amounts\nconst finalTemplate = template.map(cat => ({\n  ...cat,\n  finalAmount: cat.type === 'remainder' ? perRemainder : cat.amount,\n  amountCents: Math.round((cat.type === 'remainder' ? perRemainder : cat.amount) * 100),\n}));\n\n// Emit one item per category for the HTTP loop\nreturn finalTemplate.map(cat => ({\n  json: {\n    ...config,\n    category: cat,\n    fixedTotal,\n    remainder,\n    summaryLines: finalTemplate.map(c => c.name + ': $' + c.finalAmount.toFixed(0)),\n  }\n}));"
+      },
+      "id": "8fdaa117-6cdf-4118-b84b-a5695e1fd403",
+      "name": "Calculate Amounts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2608,
+        -528
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.bridgeUrl }}/budget/{{ $json.currentMonth }}/categories/{{ $json.category.categoryId }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ amount: $json.category.finalAmount }) }}",
+        "options": {},
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth"
+      },
+      "id": "af2b869e-2e4a-406e-9615-3af14fdc87d2",
+      "name": "Set Category Budget",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2816,
+        -528
+      ],
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "CRED_BRIDGE_ID",
+          "name": "Actual Budget Bridge"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nif (items.length === 0) return [{ json: { skip: true } }];\n\n// Pull config from the first item - use safe fallbacks since \n// HTTP response may have replaced some properties\nconst item = items[0].json;\n// Config values are lost after HTTP loop — pull directly from Config node\nconst config = $('Config + Funding Template').first().json;\nconst month = new Date().toLocaleDateString('en-US', { month: 'long', year: 'numeric' });\n\nconst monthlyIncome = config.monthlyIncome || 0;\nconst fixedTotal = item.fixedTotal || 0;\nconst remainder = item.remainder || 0;\nconst summaryLines = item.summaryLines || [];\n\nlet msg = month + ' Budget Auto-Funded\\n\\n';\nmsg += 'Income estimate: $' + monthlyIncome.toLocaleString() + '\\n';\nmsg += 'Fixed obligations: $' + fixedTotal.toFixed(0) + '\\n';\nmsg += 'Debt attack remainder: $' + remainder.toFixed(0) + '\\n\\n';\nmsg += 'Funded:\\n';\nfor (const line of summaryLines) {\n  msg += '  - ' + line + '\\n';\n}\nmsg += '\\nBudget is live in Actual. Have a great month.';\n\nreturn [{ json: { \n  monthlyIncome,\n  fixedTotal,\n  remainder,\n  summaryLines,\n  telegramMessage: msg,\n  telegramChatId: config.telegramChatId\n} }];"
+      },
+      "id": "8f317fe0-84d5-430c-8212-b534cf5746da",
+      "name": "Build Confirmation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3008,
+        -528
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $json.telegramChatId }}",
+        "text": "={{ $json.telegramMessage }}",
+        "additionalFields": {}
+      },
+      "id": "68a40fbd-17e0-459c-aea2-b1913d944112",
+      "name": "Confirm via Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [
+        3216,
+        -528
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "CRED_TELEGRAM_ID",
+          "name": "Telegram Bot"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "1st of Month 6am": {
+      "main": [
+        [
+          {
+            "node": "Config + Funding Template",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config + Funding Template": {
+      "main": [
+        [
+          {
+            "node": "Calculate Amounts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Amounts": {
+      "main": [
+        [
+          {
+            "node": "Set Category Budget",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Category Budget": {
+      "main": [
+        [
+          {
+            "node": "Build Confirmation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Confirmation": {
+      "main": [
+        [
+          {
+            "node": "Confirm via Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "aa8170c3-bb20-459c-a559-5b9ba4cf63fc",
+  "meta": {
+    "instanceId": "1bed0a85a374b293a0ae04ae85d310dadcbdad591ac0a08781d2b9ef5e91b791"
+  },
+  "id": "OrYV1jZTy4jWStMO",
+  "tags": []
+}

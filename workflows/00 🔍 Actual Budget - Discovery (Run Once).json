@@ -1,0 +1,288 @@
+{
+  "name": "00 🔍 Actual Budget - Discovery (Run Once)",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "b75db6a8-4f3b-4d9f-b70f-81bc334478b9",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        4704,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{\n  json: {\n    // Your Actual Budget bridge container name/URL (no trailing slash)\n    // If using Docker Compose, this is typically the service name\n    bridgeUrl: 'http://actual-bridge:3788',\n    telegramChatId:   'REPLACE_WITH_YOUR_TELEGRAM_CHAT_ID',\n  }\n}];"
+      },
+      "id": "e231c902-4059-4a81-8fb3-41db6520ff9c",
+      "name": "Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4912,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.bridgeUrl }}/health",
+        "options": {}
+      },
+      "id": "9b34f495-1f13-44eb-9e6f-f50024c060ad",
+      "name": "Health Check",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5104,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const health = $input.item.json;\nconst config = $('Config').item.json;\nif (health.status !== 'ok') throw new Error('Bridge unhealthy: ' + JSON.stringify(health));\nif (!health.initialized) throw new Error('Bridge not initialized yet — wait a few seconds and retry');\nreturn [{ json: config }];"
+      },
+      "id": "9bd0aa28-2fac-4ed2-84b6-e8e3ef96b122",
+      "name": "Verify Healthy",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5312,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.bridgeUrl }}/categories",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": []
+        },
+        "options": {},
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth"
+      },
+      "id": "99f0d2fa-6974-4a95-844e-aea7c23469e0",
+      "name": "Get Categories",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5504,
+        560
+      ],
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "CRED_BRIDGE_ID",
+          "name": "Actual Budget Bridge"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const catRes = $input.item.json;\nconst config = $('Config').item.json;\nreturn [{ json: { ...config, categoryGroups: catRes.data || [] } }];"
+      },
+      "id": "ac294bf9-c88f-436d-888a-96ff847df445",
+      "name": "Store Categories",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5712,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.bridgeUrl }}/accounts",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": []
+        },
+        "options": {},
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth"
+      },
+      "id": "2eaebf6e-5d66-46a5-91fe-ce3a506f0dad",
+      "name": "Get Accounts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5904,
+        560
+      ],
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "CRED_BRIDGE_ID",
+          "name": "Actual Budget Bridge"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const accRes = $input.item.json;\nconst prev = $('Store Categories').item.json;\nconst accounts = accRes.data || [];\nconst groups = prev.categoryGroups || [];\n\n// Plain text only — avoids ALL Telegram Markdown parse errors\nlet msg = '=== ACTUAL BUDGET DISCOVERY ===\\n\\n';\n\nmsg += '--- ACCOUNTS ---\\n';\nmsg += '(copy IDs into workflow 04)\\n\\n';\nfor (const acc of accounts) {\n  if (acc.closed) continue;\n  const bal = (acc.balance || 0) / 100;\n  msg += acc.name + '\\n';\n  msg += 'ID: ' + acc.id + '\\n';\n  msg += 'Balance: $' + bal.toLocaleString('en-US', { minimumFractionDigits: 2 }) + '\\n\\n';\n}\n\nmsg += '\\n--- CATEGORY IDs ---\\n';\nmsg += '(copy into workflows 02 + 03)\\n\\n';\nfor (const group of groups) {\n  if (group.hidden) continue;\n  msg += '[' + group.name + ']\\n';\n  for (const cat of (group.categories || [])) {\n    if (cat.hidden) continue;\n    msg += '  ' + cat.name + '\\n';\n    msg += '  ' + cat.id + '\\n';\n  }\n  msg += '\\n';\n}\n\nmsg += 'Bridge: ' + prev.bridgeUrl;\n\n// Split into chunks under 3800 chars (safe under Telegram 4096 limit)\nconst LIMIT = 3800;\nconst messages = [];\nif (msg.length <= LIMIT) {\n  messages.push(msg);\n} else {\n  const lines = msg.split('\\n');\n  let chunk = '';\n  for (const line of lines) {\n    if (chunk.length + line.length + 1 > LIMIT) {\n      messages.push(chunk.trim());\n      chunk = line + '\\n';\n    } else {\n      chunk += line + '\\n';\n    }\n  }\n  if (chunk.trim()) messages.push(chunk.trim());\n}\n\nreturn messages.map((m, i) => ({\n  json: {\n    telegramChatId: $('Config').first().json.telegramChatId,\n    telegramMessage: messages.length > 1 ? '(' + (i+1) + '/' + messages.length + ')\\n\\n' + m : m\n  }\n}));"
+      },
+      "id": "55f2fff4-892b-4172-9970-5984a3bd3ea0",
+      "name": "Format Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6112,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $json.telegramChatId }}",
+        "text": "={{ $json.telegramMessage }}",
+        "additionalFields": {}
+      },
+      "id": "7b071b9a-53f6-4be7-9d66-fbec65601ad4",
+      "name": "Send to Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [
+        6304,
+        560
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "CRED_TELEGRAM_ID",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "toText",
+        "sourceProperty": "result.text",
+        "binaryPropertyName": "Actual_Text_Data",
+        "options": {
+          "fileName": "budget_IDs.txt"
+        }
+      },
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        6512,
+        560
+      ],
+      "id": "d0005160-b273-4276-b8c3-71906a7f30a8",
+      "name": "Convert to File"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Health Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Health Check": {
+      "main": [
+        [
+          {
+            "node": "Verify Healthy",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify Healthy": {
+      "main": [
+        [
+          {
+            "node": "Get Categories",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Categories": {
+      "main": [
+        [
+          {
+            "node": "Store Categories",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store Categories": {
+      "main": [
+        [
+          {
+            "node": "Get Accounts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Accounts": {
+      "main": [
+        [
+          {
+            "node": "Format Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Report": {
+      "main": [
+        [
+          {
+            "node": "Send to Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send to Telegram": {
+      "main": [
+        [
+          {
+            "node": "Convert to File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "b6d6b14f-46bd-45c6-9b2e-97320325f5af",
+  "meta": {
+    "instanceId": "1bed0a85a374b293a0ae04ae85d310dadcbdad591ac0a08781d2b9ef5e91b791"
+  },
+  "id": "xGdb3DaP0ZNxrHXQ",
+  "tags": []
+}
